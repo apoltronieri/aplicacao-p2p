@@ -1,3 +1,5 @@
+import socket
+import time
 import unittest
 
 from src.discovery import (
@@ -5,6 +7,7 @@ from src.discovery import (
     PeerAnnouncement,
     PeerRegistry,
     UdpAnnouncer,
+    UdpDiscoveryListener,
     decode_announcement,
     encode_announcement,
 )
@@ -71,6 +74,70 @@ class AnnouncementTest(unittest.TestCase):
             PeerAnnouncement("peer-1", "ana", 5000),
         )
         self.assertTrue(fake_socket.closed)
+
+
+class DiscoveryListenerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.registry = PeerRegistry()
+        self.listener = UdpDiscoveryListener(self.registry, "local-peer")
+
+    def test_registers_remote_peer_using_datagram_source_ip(self) -> None:
+        data = encode_announcement(PeerAnnouncement("remote-peer", "bia", 5001))
+
+        peer = self.listener.handle_datagram(
+            data,
+            ("192.168.1.20", 41000),
+            seen_at=25.0,
+        )
+
+        self.assertEqual(peer, Peer("bia", "192.168.1.20", 5001, 25.0))
+        self.assertEqual(self.registry.list_peers(), (peer,))
+
+    def test_ignores_own_announcement(self) -> None:
+        data = encode_announcement(PeerAnnouncement("local-peer", "ana", 5000))
+
+        peer = self.listener.handle_datagram(data, ("192.168.1.10", 41000))
+
+        self.assertIsNone(peer)
+        self.assertEqual(self.registry.list_peers(), ())
+
+    def test_ignores_malformed_datagram(self) -> None:
+        peer = self.listener.handle_datagram(b"not JSON", ("192.168.1.20", 41000))
+
+        self.assertIsNone(peer)
+        self.assertEqual(self.registry.list_peers(), ())
+
+    def test_receives_announcement_over_udp(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            discovery_port = probe.getsockname()[1]
+
+        listener = UdpDiscoveryListener(
+            self.registry,
+            "local-peer",
+            discovery_port=discovery_port,
+            bind_address="127.0.0.1",
+            socket_timeout=0.05,
+        )
+        listener.start()
+        try:
+            data = encode_announcement(
+                PeerAnnouncement("remote-peer", "bia", 5001)
+            )
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
+                sender.sendto(data, ("127.0.0.1", discovery_port))
+
+            deadline = time.monotonic() + 1.0
+            while not self.registry.list_peers() and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            peers = self.registry.list_peers()
+            self.assertEqual(len(peers), 1)
+            self.assertEqual(peers[0].name, "bia")
+            self.assertEqual(peers[0].ip, "127.0.0.1")
+            self.assertEqual(peers[0].tcp_port, 5001)
+        finally:
+            listener.stop(timeout=1.0)
 
 
 class PeerRegistryTest(unittest.TestCase):

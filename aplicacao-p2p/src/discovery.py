@@ -16,6 +16,8 @@ DISCOVERY_PROTOCOL_VERSION = 1
 ANNOUNCEMENT_MESSAGE_TYPE = "peer_announcement"
 DEFAULT_DISCOVERY_PORT = 37_020
 DEFAULT_ANNOUNCEMENT_INTERVAL = 5.0
+DEFAULT_INACTIVITY_TIMEOUT = 15.0
+MAX_DISCOVERY_PACKET_SIZE = 4_096
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +137,110 @@ class UdpAnnouncer:
         while not self._stop_event.is_set():
             self.send_once()
             self._stop_event.wait(self.interval)
+
+
+class UdpDiscoveryListener:
+    """Recebe anúncios UDP e atualiza o registro de peers."""
+
+    def __init__(
+        self,
+        registry: PeerRegistry,
+        own_peer_id: str,
+        *,
+        discovery_port: int = DEFAULT_DISCOVERY_PORT,
+        bind_address: str = "",
+        inactivity_timeout: float = DEFAULT_INACTIVITY_TIMEOUT,
+        socket_timeout: float = 0.5,
+        socket_factory: Callable[[], socket.socket] | None = None,
+    ) -> None:
+        if not isinstance(own_peer_id, str) or not own_peer_id.strip():
+            raise ValueError("own peer ID must not be empty")
+        _validate_port(discovery_port, label="discovery port")
+        if not math.isfinite(inactivity_timeout) or inactivity_timeout <= 0:
+            raise ValueError("inactivity timeout must be a finite positive value")
+        if not math.isfinite(socket_timeout) or socket_timeout <= 0:
+            raise ValueError("socket timeout must be a finite positive value")
+
+        self.registry = registry
+        self.own_peer_id = own_peer_id.strip()
+        self.discovery_port = discovery_port
+        self.bind_address = bind_address
+        self.inactivity_timeout = inactivity_timeout
+        self.socket_timeout = socket_timeout
+        self._socket_factory = socket_factory or _create_udp_socket
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._socket: socket.socket | None = None
+
+    def handle_datagram(
+        self,
+        data: bytes,
+        source: tuple[str, int],
+        *,
+        seen_at: float | None = None,
+    ) -> Peer | None:
+        """Registra os dados recebidos quando o anúncio é válido."""
+
+        try:
+            announcement = decode_announcement(data)
+        except ValueError:
+            return None
+
+        if announcement.peer_id == self.own_peer_id:
+            return None
+
+        return self.registry.upsert(
+            announcement.name,
+            source[0],
+            announcement.tcp_port,
+            seen_at=seen_at,
+        )
+
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            raise RuntimeError("UDP discovery listener is already running")
+
+        udp_socket = self._socket_factory()
+        try:
+            udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            udp_socket.bind((self.bind_address, self.discovery_port))
+            udp_socket.settimeout(self.socket_timeout)
+        except BaseException:
+            udp_socket.close()
+            raise
+
+        self._socket = udp_socket
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(udp_socket,),
+            name="udp-peer-discovery-listener",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self, timeout: float | None = None) -> None:
+        self._stop_event.set()
+        if self._socket is not None:
+            self._socket.close()
+        if self._thread is not None:
+            self._thread.join(timeout)
+        self._socket = None
+
+    def _run(self, udp_socket: socket.socket) -> None:
+        while not self._stop_event.is_set():
+            try:
+                data, source = udp_socket.recvfrom(MAX_DISCOVERY_PACKET_SIZE)
+            except socket.timeout:
+                pass
+            except OSError:
+                if self._stop_event.is_set():
+                    return
+                raise
+            else:
+                self.handle_datagram(data, source)
+
+            self.registry.remove_inactive(self.inactivity_timeout)
 
 
 def _create_udp_socket() -> socket.socket:
