@@ -1,6 +1,76 @@
 import unittest
 
-from src.discovery import Peer, PeerRegistry
+from src.discovery import (
+    Peer,
+    PeerAnnouncement,
+    PeerRegistry,
+    UdpAnnouncer,
+    decode_announcement,
+    encode_announcement,
+)
+
+
+class FakeSocket:
+    def __init__(self) -> None:
+        self.options: list[tuple[int, int, int]] = []
+        self.sent: list[tuple[bytes, tuple[str, int]]] = []
+        self.closed = False
+
+    def setsockopt(self, level: int, option: int, value: int) -> None:
+        self.options.append((level, option, value))
+
+    def sendto(self, data: bytes, address: tuple[str, int]) -> int:
+        self.sent.append((data, address))
+        return len(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class AnnouncementTest(unittest.TestCase):
+    def test_round_trips_announcement_as_utf8_json(self) -> None:
+        announcement = PeerAnnouncement("peer-1", "João", 5000)
+
+        encoded = encode_announcement(announcement)
+
+        self.assertEqual(decode_announcement(encoded), announcement)
+        self.assertIn("João".encode(), encoded)
+
+    def test_rejects_invalid_announcement(self) -> None:
+        invalid_messages = (
+            b"not JSON",
+            b"[]",
+            b'{"version":2,"type":"peer_announcement"}',
+            b'{"version":1,"type":"unknown"}',
+            b'{"version":1,"type":"peer_announcement"}',
+            b'{"version":1,"type":"peer_announcement","peer_id":"p1",'
+            b'"name":"ana","tcp_port":"5000"}',
+        )
+
+        for message in invalid_messages:
+            with self.subTest(message=message):
+                with self.assertRaises(ValueError):
+                    decode_announcement(message)
+
+    def test_sends_announcement_to_broadcast_address(self) -> None:
+        fake_socket = FakeSocket()
+        announcer = UdpAnnouncer(
+            "ana",
+            5000,
+            peer_id="peer-1",
+            discovery_port=37020,
+            socket_factory=lambda: fake_socket,  # type: ignore[arg-type]
+        )
+
+        transmitted = announcer.send_once()
+
+        self.assertEqual(transmitted, len(fake_socket.sent[0][0]))
+        self.assertEqual(fake_socket.sent[0][1], ("255.255.255.255", 37020))
+        self.assertEqual(
+            decode_announcement(fake_socket.sent[0][0]),
+            PeerAnnouncement("peer-1", "ana", 5000),
+        )
+        self.assertTrue(fake_socket.closed)
 
 
 class PeerRegistryTest(unittest.TestCase):
