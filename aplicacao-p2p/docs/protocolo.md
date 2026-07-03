@@ -85,3 +85,14 @@ python3 -m unittest discover -s tests -v
 
 A suíte cobre o formato dos anúncios, o registro e a expiração de peers, o
 descarte de mensagens inválidas e o recebimento UDP pela interface de loopback.
+
+## Protocolo de Mensagens (TCP)
+
+As mensagens diretas entre peers e as transferências de arquivos ocorrem sobre conexões TCP. O formato base de uma mensagem de chat é um JSON codificado em UTF-8, seguido de uma quebra de linha (`\n`) para delimitar o fim do pacote.
+
+```json
+{
+  "type": "chat_message",
+  "sender_name": "peer_remetente",
+  "content": "Olá, tudo bem?"
+}
