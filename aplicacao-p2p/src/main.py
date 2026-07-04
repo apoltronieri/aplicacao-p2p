@@ -1,19 +1,19 @@
 import sys
 import time
 from src.discovery import PeerRegistry, UdpAnnouncer, UdpDiscoveryListener
-
-#depende da pessoa 1 essa aplicação
+from src.file_transfer import send_file
 from src.connection import (
     send_chat_message,
     connect_to_peer,
     start_tcp_server,
 )
+from src.utils import mask_ip
 
 """Ponto de entrada da Aplicação P2P."""
 
 def start_terminal(my_name: str, registry: PeerRegistry):
     print("=== Aplicação P2P ===")
-    print("Comandos disponíveis: /peers, /msg <nome_do_peer> <texto>, /sair")
+    print("Comandos disponíveis: /peers, /msg <nome_do_peer> <texto>, /file <nome_do_peer> <caminho_arquivo> /sair")
     
     while True:
         try:
@@ -34,8 +34,8 @@ def start_terminal(my_name: str, registry: PeerRegistry):
                 print(f"Peers online ({len(peers)}):")
                 if not peers:
                     print(" Nenhum outro peer encontrado ainda.")
-                for p in peers:
-                    print(f" - {p.name} ({p.ip}:{p.tcp_port})")
+                for p in peers:                   
+                    print(f" - {p.name} ({mask_ip(p.ip)}:{p.tcp_port})")
 
             elif command == "/msg":
                 if len(parts) < 3:
@@ -58,6 +58,27 @@ def start_terminal(my_name: str, registry: PeerRegistry):
                     sock.close() # Fecha a conexão após o envio da mensagem
                 except Exception as e:
                     print(f"Erro ao enviar mensagem para {target_name}: {e}")
+
+            elif command == "/file":
+                if len(parts) < 3:
+                    print("Uso correto: /msg <nome_do_peer> <caminho do arquivo>")
+                    continue
+                 
+                target_name = parts[1]
+                content = parts[2]
+                
+                target_peer = next((p for p in registry.list_peers() if p.name == target_name), None)
+                
+                if not target_peer:
+                    print(f"Peer '{target_name}' não encontrado.")
+                    continue
+                try:
+                    sock = connect_to_peer(target_peer.ip, target_peer.tcp_port)
+                    send_file(sock, my_name, content)
+                    print(f"Arquivo enviado para {target_name}.")
+                    sock.close() # Fecha a conexão após o envio da mensagem
+                except Exception as e:
+                    print(f"Erro ao enviar arquivo para {target_name}: {e}")
 
             else:
                 print("Comando desconhecido.")
