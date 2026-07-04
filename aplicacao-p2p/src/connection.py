@@ -2,6 +2,8 @@ import json
 import socket
 import threading
 
+from src.file_transfer import decode_file_header, receive_file
+
 
 def send_chat_message(sock: socket.socket, sender_name: str, content: str) -> None:
     """Codifica e envia uma mensagem de texto via TCP."""
@@ -68,20 +70,45 @@ def _run_tcp_server(port: int) -> None:
 
 def _handle_client(client_socket: socket.socket, address) -> None:
     """Recebe e processa uma mensagem TCP."""
+
     try:
-        data = client_socket.recv(4096)
+        buffer = b""
 
-        if not data:
-            return
+        # Lê até encontrar o fim do cabeçalho
+        while b"\n" not in buffer:
+            chunk = client_socket.recv(4096)
 
-        msg = decode_chat_message(data)
+            if not chunk:
+                return
+
+            buffer += chunk
+
+        header_bytes, remaining = buffer.split(b"\n", 1)
+
+        # Primeiro tenta interpretar como mensagem de chat
+        msg = decode_chat_message(header_bytes)
 
         if msg:
             print(f"\n[Mensagem de {msg['sender_name']}]: {msg['content']}")
             print(">> ", end="", flush=True)
-        else:
-            print(f"\nMensagem inválida recebida de {address}")
+            return
+
+        # Depois tenta interpretar como transferência de arquivo
+        header = decode_file_header(header_bytes)
+
+        if header:
+            caminho = receive_file(
+                client_socket,
+                header,
+                initial_data=remaining
+            )
+
+            print(f"\nArquivo recebido: {caminho}")
             print(">> ", end="", flush=True)
+            return
+
+        print(f"\nMensagem inválida recebida de {address}")
+        print(">> ", end="", flush=True)
 
     except Exception as e:
         print(f"\nErro ao receber mensagem de {address}: {e}")
